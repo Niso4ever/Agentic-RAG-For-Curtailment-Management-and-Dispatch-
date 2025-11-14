@@ -1,10 +1,29 @@
-def solve_dispatch(forecast_mw: float):
+"""Simple placeholder MILP solver."""
+
+from typing import Dict, Any
+
+
+def solve_dispatch(
+    mw_forecast: float,
+    bess_soc: float = 0.40,
+    bess_capacity_mwh: float = 10.0,
+    max_charge_mw: float = 5.0,
+    max_discharge_mw: float = 5.0,
+) -> Dict[str, Any]:
     """
-    Placeholder MILP optimization.
-    Later we replace this with PuLP / OR-Tools real optimization.
+    Pseudo MILP optimization for dispatch planning.
+
+    Replace this logic with PuLP / OR-Tools implementation later.
     """
-    optimal_dispatch = max(0, forecast_mw - 5)  # fake logic
+    dispatch_mw = mw_forecast * 0.9
+    charge_mw = max_charge_mw * 0.7
+    discharge_mw = max_discharge_mw * 0.3
+    curtailment_mw = max(mw_forecast - dispatch_mw, 0)
+
     return {
-        "charge_mw": 5,
-        "dispatch_mw": optimal_dispatch
+        "dispatch_mw": dispatch_mw,
+        "charge_mw": charge_mw,
+        "discharge_mw": discharge_mw,
+        "curtailment_mw": curtailment_mw,
+        "soc_mwh": bess_soc * bess_capacity_mwh,
     }
