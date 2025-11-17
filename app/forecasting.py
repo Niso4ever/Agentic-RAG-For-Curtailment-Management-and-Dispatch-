@@ -12,9 +12,10 @@ def _stub_forecast() -> Dict[str, float]:
 
 def _load_features_from_bigquery() -> Optional[Dict[str, Any]]:
     """Load the latest feature row from the BigQuery table."""
-    project_id = os.getenv("VERTEX_PROJECT_ID", "pristine-valve-477208")
-    dataset_id = "solar_forcast_data"
-    table_id = "daily_solar_output"
+    # Use env vars when provided; fall back to sensible defaults if empty/undefined.
+    project_id = os.getenv("VERTEX_PROJECT_ID") or "pristine-valve-477208"
+    dataset_id = os.getenv("VERTEX_DATASET_ID") or "solar_forcast_data"
+    table_id = os.getenv("VERTEX_TABLE_ID") or "daily_solar_output"
 
     client = bigquery.Client(project=project_id)
     query = f"""
@@ -44,9 +45,9 @@ def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
       - VERTEX_ENDPOINT_ID (either full path or bare ID)
       - VERTEX_LOCATION (defaults to us-central1)
     """
-    project = os.getenv("VERTEX_PROJECT_ID", "pristine-valve-477208")
-    endpoint_id = os.getenv("VERTEX_ENDPOINT_ID")
-    location = os.getenv("VERTEX_LOCATION", "us-central1")
+    project = os.getenv("VERTEX_PROJECT_ID") or "pristine-valve-477208"
+    endpoint_id = os.getenv("VERTEX_ENDPOINT_ID") or "7273285910412656640"
+    location = os.getenv("VERTEX_LOCATION") or "us-central1"
 
     if not project or not endpoint_id:
         raise ValueError("Missing VERTEX_PROJECT_ID or VERTEX_ENDPOINT_ID")
