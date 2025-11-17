@@ -6,4 +6,5 @@ __pycache__/
 .DS_Store
 .pytest_cache/
 .vscode/
-
+sa_key.json
+sa_key.json:Zone.Identifier

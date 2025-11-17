@@ -1,9 +1,9 @@
 import google.cloud.aiplatform as aiplatform
 
-PROJECT_ID = "pristine-valve-477208-i1"
+PROJECT_ID = "pristine-valve-477208"
 REGION = "us-central1"
 DATASET_DISPLAY_NAME = "Rag_AutoML"
-BIGQUERY_SOURCE_URI = "bq://pristine-valve-477208-i1.solar_forcast_data.daily_solar_output"
+BIGQUERY_SOURCE_URI = "bq://pristine-valve-477208.solar_forcast_data.daily_solar_output"
 DATASET_RESOURCE_NAME = "projects/3281379919/locations/us-central1/datasets/2549896657428807680" # Replace with your actual dataset resource name
 
 MODEL_DISPLAY_NAME = "solar_forecast_automl_model"
