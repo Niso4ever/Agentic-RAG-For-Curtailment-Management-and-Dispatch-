@@ -2,7 +2,11 @@ import json
 import os
 from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
 from google.cloud import bigquery
+
+# Ensure .env variables are loaded even when this module is used standalone
+load_dotenv()
 
 
 def _stub_forecast() -> Dict[str, float]:
