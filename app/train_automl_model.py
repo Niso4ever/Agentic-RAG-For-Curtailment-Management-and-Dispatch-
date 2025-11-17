@@ -1,12 +1,16 @@
+import os
+
 import google.cloud.aiplatform as aiplatform
 
 PROJECT_ID = "pristine-valve-477208"
 REGION = "us-central1"
-DATASET_DISPLAY_NAME = "Rag_AutoML"
-BIGQUERY_SOURCE_URI = "bq://pristine-valve-477208.solar_forcast_data.daily_solar_output"
-DATASET_RESOURCE_NAME = "projects/3281379919/locations/us-central1/datasets/2549896657428807680" # Replace with your actual dataset resource name
+DATASET_DISPLAY_NAME = "solar_forcast_data"
+BIGQUERY_SOURCE_URI = "bq://pristine-valve-477208i1.solar_forcast_data.daily_solar_output"
+# Replace with your actual dataset resource name for the solar_forcast_data dataset
+DATASET_RESOURCE_NAME = os.getenv("AUTOML_DATASET_RESOURCE") or "projects/PROJECT_NUMBER/locations/us-central1/datasets/DATASET_ID"
 
 MODEL_DISPLAY_NAME = "solar_forecast_automl_model"
+MODEL_VERSION = "1"
 TARGET_COLUMN = "target_solar_output"
 TRAINING_BUDGET_MILLI_NODE_HOURS = 8000 # 8 hours
 
@@ -25,7 +29,7 @@ def train_automl_tabular_model(
 
     # Create and run the AutoML Tabular training job
     job = aiplatform.AutoMLTabularTrainingJob(
-        display_name=f"{model_display_name}_training_job",
+        display_name=f"{model_display_name}_training_job_v{MODEL_VERSION}",
         optimization_prediction_type="regression",
         column_transformations=[
             {"auto": {"column_name": "forecast_timestamp"}},

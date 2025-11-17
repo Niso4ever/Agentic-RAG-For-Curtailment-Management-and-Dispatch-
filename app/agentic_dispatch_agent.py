@@ -1,6 +1,8 @@
 # app/agentic_dispatch_agent.py
 
 import json
+import os
+from statistics import mean
 from typing import List, Dict, Any
 
 from app.llm_client import client, MODEL_NAME
@@ -107,6 +109,133 @@ MILP Dispatch → {dispatch}
 
 Set OPENAI_API_KEY and install the OpenAI SDK to enable real model usage.
 """
+
+
+# ============================================================
+# SOLAR FORECAST PREDICTION (historical + future rows)
+# ============================================================
+
+def _naive_projection(
+    historical_data: List[Dict[str, Any]],
+    future_data: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Lightweight, dependency-free forecast: extrapolate using the average of recent deltas.
+    Falls back to a flat line when only one or zero historical points exist.
+    """
+    outputs = [
+        float(row["target_solar_output"])
+        for row in historical_data
+        if row.get("target_solar_output") is not None
+    ]
+
+    if not outputs:
+        last_point = 0.0
+        slope = 0.0
+    elif len(outputs) == 1:
+        last_point = outputs[-1]
+        slope = 0.0
+    else:
+        last_point = outputs[-1]
+        deltas = [b - a for a, b in zip(outputs[-3:-1], outputs[-2:])]
+        slope = mean(deltas) if deltas else outputs[-1] - outputs[-2]
+
+    projections: List[Dict[str, Any]] = []
+    for idx, row in enumerate(future_data):
+        next_val = last_point + slope * (idx + 1)
+        projections.append(
+            {
+                **row,
+                "target_solar_output": float(next_val),
+            }
+        )
+    return projections
+
+
+def _vertex_timeseries_prediction(
+    historical_data: List[Dict[str, Any]],
+    future_data: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Send combined historical+future rows to a Vertex AI endpoint.
+    Assumes a time-series/AutoML model that can handle missing targets for the prediction window.
+    """
+    project = "pristine-valve-477208i1"
+    endpoint_id = os.getenv("VERTEX_ENDPOINT_ID") or os.getenv("VERTEX_FORECAST_ENDPOINT_ID")
+    location = os.getenv("VERTEX_LOCATION", "us-central1")
+
+    if not project or not endpoint_id:
+        raise ValueError("Missing VERTEX_PROJECT_ID or VERTEX_ENDPOINT_ID for Vertex inference")
+
+    try:
+        from google.cloud import aiplatform
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise ImportError("google-cloud-aiplatform is not installed") from exc
+
+    aiplatform.init(project=project, location=location)
+
+    endpoint_path = (
+        endpoint_id
+        if endpoint_id.startswith("projects/")
+        else f"projects/{project}/locations/{location}/endpoints/{endpoint_id}"
+    )
+
+    endpoint = aiplatform.Endpoint(endpoint_path)
+
+    # Ensure future rows include the target column with None so the model knows to predict it.
+    instances: List[Dict[str, Any]] = []
+    for row in historical_data:
+        instances.append(dict(row))
+    for row in future_data:
+        instance = dict(row)
+        instance.setdefault("target_solar_output", None)
+        instances.append(instance)
+
+    prediction = endpoint.predict(instances=instances)
+    raw_predictions = prediction.predictions or []
+
+    # Grab as many predictions as we have future rows (take the tail if extra values are returned).
+    future_count = len(future_data)
+    trimmed = raw_predictions[-future_count:] if len(raw_predictions) >= future_count else raw_predictions
+
+    normalized: List[Dict[str, Any]] = []
+    for base_row, raw in zip(future_data, trimmed):
+        if isinstance(raw, dict):
+            value = raw.get("value") or raw.get("predicted_value") or next(iter(raw.values()), 0.0)
+        else:
+            value = raw
+        normalized.append(
+            {
+                **base_row,
+                "target_solar_output": float(value),
+            }
+        )
+
+    # If the endpoint returned fewer predictions than requested, pad with naive estimates.
+    if len(normalized) < future_count:
+        missing_future = future_data[len(normalized):]
+        normalized.extend(_naive_projection(historical_data, missing_future))
+
+    return normalized
+
+
+def get_solar_forecast_prediction(
+    historical_data: List[Dict[str, Any]],
+    future_data: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Predict solar output for the provided future horizon.
+    Uses Vertex AI when configured; otherwise falls back to a simple local extrapolation.
+    """
+    provider = os.getenv("FORECAST_PROVIDER", "stub").lower()
+
+    if provider == "vertex":
+        try:
+            return _vertex_timeseries_prediction(historical_data, future_data)
+        except Exception as exc:
+            print(f"Vertex prediction failed ({exc}); falling back to naive projection.")
+
+    return _naive_projection(historical_data, future_data)
 
 
 # ============================================================

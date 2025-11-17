@@ -2,8 +2,8 @@ import google.cloud.aiplatform as aiplatform
 
 PROJECT_ID = "pristine-valve-477208"
 REGION = "us-central1"
-DATASET_DISPLAY_NAME = "Rag_AutoML"
-BIGQUERY_SOURCE_URI = "bq://pristine-valve-477208.solar_forcast_data.daily_solar_output"
+DATASET_DISPLAY_NAME = "solar_forcast_data"
+BIGQUERY_SOURCE_URI = "bq://pristine-valve-477208i1.solar_forcast_data.daily_solar_output"
 
 def create_automl_tabular_dataset(
     project: str,
