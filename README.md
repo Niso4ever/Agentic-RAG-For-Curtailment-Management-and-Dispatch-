@@ -45,6 +45,8 @@ Each component lives in `app/`:
 4. **Configure secrets** – create a `.env` file with:
    ```bash
    OPENAI_API_KEY=sk-...
+   OPENWEATHER_API_KEY=ow-...
+   OPENWEATHER_LOCATION=Abu Dhabi  # optional, defaults to Abu Dhabi
    ```
 5. **Run the prototype**
    ```bash
@@ -60,4 +62,3 @@ Each component lives in `app/`:
 - **Expose an API/UI**: wrap `run_agent` in FastAPI or Streamlit so operators can query curtailment strategies.
 
 Contributions and ideas are welcome—open an issue or PR with your approach. Once you add real models, remember to update `requirements.txt` and document additional environment variables. Let's curb curtailment together. 💡⚡
-

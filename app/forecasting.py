@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, Optional
 from datetime import datetime, date, timezone
 
+import requests
 from dotenv import load_dotenv
 from google.cloud import bigquery
 import google.auth
@@ -22,10 +23,13 @@ ALLOWED_FEATURES = [
     "mean_temperature",
     "mean_wind_speed",
     "series_id",
+    "target_solar_output",
 ]
 
 # Always use this value (most common in training dataset)
 DEFAULT_SERIES_ID = "725300"
+DEFAULT_LOCATION = "Abu Dhabi"
+OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 
 
 # -------------------------------------------------------------------
@@ -47,6 +51,43 @@ def _coerce_json_safe(value: Any) -> Any:
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return value
+
+
+def _normalize_date(value: Any) -> str:
+    """
+    Ensure forecast_timestamp is a date string (YYYY-MM-DD) as required by the
+    AutoML tabular schema. Accepts datetime/date/str.
+    """
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        # Trust caller; assume already ISO formatted
+        return value
+    # Fallback to "today" to avoid missing required field
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _build_vertex_instance(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Construct the exact instance the Vertex AutoML tabular model expects.
+    Drops any extra keys and fills required fields with safe defaults.
+    """
+    instance: Dict[str, Any] = {}
+    instance["forecast_timestamp"] = _normalize_date(row.get("forecast_timestamp"))
+    instance["mean_temperature"] = float(row.get("mean_temperature", 0.0))
+    instance["mean_wind_speed"] = float(row.get("mean_wind_speed", 0.0))
+    instance["series_id"] = str(row.get("series_id") or DEFAULT_SERIES_ID)
+
+    # Allow null for inference targets; ensure key exists for schema consistency
+    instance["target_solar_output"] = (
+        float(row["target_solar_output"])
+        if row.get("target_solar_output") not in (None, "")
+        else None
+    )
+
+    return instance
 
 
 # -------------------------------------------------------------------
@@ -119,6 +160,47 @@ def _load_features_from_bigquery() -> Optional[Dict[str, Any]]:
 
 
 # -------------------------------------------------------------------
+# OpenWeather loader
+# -------------------------------------------------------------------
+def _fetch_weather_features(location: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch current weather for a location from OpenWeather and map to the
+    model's tabular feature names.
+    """
+    api_key = os.getenv("OPENWEATHER_API_KEY")
+    if not api_key:
+        print("[forecasting][WARN] OPENWEATHER_API_KEY is not set; skipping live weather fetch.")
+        return None
+
+    params = {"q": location, "appid": api_key, "units": "metric"}
+    try:
+        resp = requests.get(OPENWEATHER_URL, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"[forecasting][WARN] OpenWeather call failed: {exc}")
+        return None
+
+    main = data.get("main", {})
+    wind = data.get("wind", {})
+
+    ts = data.get("dt")
+    if ts:
+        ts = datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+    else:
+        ts = datetime.now(timezone.utc).date().isoformat()
+
+    return {
+        "forecast_timestamp": ts,
+        "mean_temperature": float(main.get("temp", 0.0)),
+        "mean_wind_speed": float(wind.get("speed", 0.0)),
+        "series_id": DEFAULT_SERIES_ID,
+        "target_solar_output": None,
+        "debug_weather_source": data,  # preserved for debugging; filtered before Vertex call
+    }
+
+
+# -------------------------------------------------------------------
 # Vertex AI predictor
 # -------------------------------------------------------------------
 def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
@@ -139,10 +221,12 @@ def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
     aiplatform.init(project=project, location=location, credentials=credentials)
     endpoint = aiplatform.Endpoint(endpoint_path)
 
-    print("[forecasting] Sending instance to Vertex AI:")
-    print(json.dumps(features, indent=2))
+    payload = {k: features.get(k) for k in ALLOWED_FEATURES}
 
-    prediction = endpoint.predict(instances=[features])
+    print("[forecasting] Sending instance to Vertex AI:")
+    print(json.dumps(payload, indent=2))
+
+    prediction = endpoint.predict(instances=[payload])
 
     if not prediction.predictions:
         raise ValueError("Vertex returned empty predictions")
@@ -165,6 +249,7 @@ def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
         "mw": float(mw),
         "confidence": confidence,
         "source": "vertex",
+        "features_used": payload,
     }
 
 
@@ -178,28 +263,22 @@ def forecast_solar(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if provider == "stub":
         return _stub_forecast()
 
-    # Load latest row from BigQuery
-    row = features or _load_features_from_bigquery()
+    location = os.getenv("OPENWEATHER_LOCATION", DEFAULT_LOCATION)
+
+    # Prefer live weather → explicit overrides → BigQuery fallback.
+    row = (
+        _fetch_weather_features(location)
+        or features
+        or _load_features_from_bigquery()
+    )
+
     if not row:
-        return {**_stub_forecast(), "note": "No BigQuery features"}
+        return {**_stub_forecast(), "note": "No weather/BQ features"}
 
-    # -------------------------------------------------------------------
-    # Construct the EXACT feature set model expects
-    # -------------------------------------------------------------------
-    instance = {}
+    instance = _build_vertex_instance(row)
 
-    # Required datetime feature
-    instance["forecast_timestamp"] = row.get("forecast_timestamp")
-
-    # Weather features
-    instance["mean_temperature"] = float(row.get("mean_temperature", 0))
-    instance["mean_wind_speed"] = float(row.get("mean_wind_speed", 0))
-
-    # FIXED categorical feature (to match training distribution)
-    instance["series_id"] = DEFAULT_SERIES_ID
-
-    print("[forecasting] Final instance for Vertex AI:")
-    print(json.dumps(instance, indent=2))
+    print("[forecasting] Final instance for Vertex AI (tabular):")
+    print(json.dumps({k: v for k, v in instance.items() if k in ALLOWED_FEATURES}, indent=2))
 
     try:
         return _predict_with_vertex(instance)

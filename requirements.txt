@@ -3,3 +3,4 @@ python-dotenv>=1.0.1
 google-cloud-aiplatform>=1.48.0
 google-cloud-bigquery>=3.24.0
 ortools>=9.10.4067
+requests>=2.31.0
