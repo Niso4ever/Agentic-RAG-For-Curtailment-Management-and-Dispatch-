@@ -13,3 +13,4 @@ if not OPENAI_API_KEY:
 
 # Default model
 MODEL_NAME = "gpt-5"
+EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")

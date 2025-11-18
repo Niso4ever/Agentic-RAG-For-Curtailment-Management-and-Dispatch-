@@ -6,15 +6,11 @@ import faiss
 import numpy as np
 from pypdf import PdfReader
 
-from dotenv import load_dotenv
 from openai import OpenAI
 
+from app.config import OPENAI_API_KEY, EMBED_MODEL
+
 # --- Config ---
-load_dotenv()
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-3-small")
-
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))

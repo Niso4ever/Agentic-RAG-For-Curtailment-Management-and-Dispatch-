@@ -37,6 +37,19 @@ def get_solar_forecast_stub() -> Dict[str, Any]:
         }
 
 
+def prepare_milp_payload(forecast_output: Dict[str, Any], rag_output: Dict[str, Any], plant_meta: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build the MILP input payload from trusted sources (ignore any LLM-provided numbers).
+    """
+    return {
+        "mw_forecast": forecast_output.get("mw", 0.0) or 0.0,
+        "bess_soc": plant_meta.get("soc", 0.35),
+        "bess_capacity_mwh": plant_meta.get("capacity_mwh", 50.0),
+        "max_charge_mw": plant_meta.get("max_charge_mw", 5.0),
+        "max_discharge_mw": plant_meta.get("max_discharge_mw", 5.0),
+    }
+
+
 # =====================================================================
 # RAG TOOL — real FAISS vector search
 # =====================================================================
@@ -61,8 +74,8 @@ def get_rag_insights_stub(query: str) -> Dict[str, Any]:
 
 def solve_milp_dispatch_stub(
     mw_forecast: float,
-    bess_soc: float = 0.40,
-    bess_capacity_mwh: float = 10.0,
+    bess_soc: float = 0.35,
+    bess_capacity_mwh: float = 50.0,
     max_charge_mw: float = 5.0,
     max_discharge_mw: float = 5.0,
 ) -> Dict[str, Any]:

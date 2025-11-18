@@ -21,5 +21,8 @@ MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 
 client: Optional["OpenAI"] = None
 
-if OPENAI_API_KEY and OpenAI:
+# Ignore known placeholder values so we fall back to stubbed responses
+_placeholder_keys = {"your_openai_api_key_here", "your_openai_key_here", "replace_me"}
+
+if OPENAI_API_KEY and OPENAI_API_KEY not in _placeholder_keys and OpenAI:
     client = OpenAI(api_key=OPENAI_API_KEY)
