@@ -204,7 +204,7 @@ def _vertex_timeseries_prediction(
     Assumes a time-series/AutoML model that can handle missing targets
     for the prediction window.
     """
-    project = os.getenv("VERTEX_PROJECT_ID", "pristine-valve-477208-i1")
+    project = os.getenv("VERTEX_PROJECT_ID", "pristine-valve-477208i1")
     endpoint_id = os.getenv("VERTEX_ENDPOINT_ID") or os.getenv(
         "VERTEX_FORECAST_ENDPOINT_ID"
     )
