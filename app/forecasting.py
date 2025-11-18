@@ -5,6 +5,9 @@ from datetime import datetime, date, timezone
 
 from dotenv import load_dotenv
 from google.cloud import bigquery
+import google.auth
+from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 
 # -------------------------------------------------------------------
 # Load .env file
@@ -47,14 +50,50 @@ def _coerce_json_safe(value: Any) -> Any:
 
 
 # -------------------------------------------------------------------
+# Auth helpers
+# -------------------------------------------------------------------
+def _get_adc_credentials():
+    """
+    Prefer Application Default Credentials (gcloud auth application-default login).
+    Falls back to a service-account key file if provided. Ignores missing files.
+    """
+    key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+    if key_path and os.path.exists(key_path):
+        credentials = service_account.Credentials.from_service_account_file(key_path)
+        project_id = credentials.project_id
+    else:
+        if key_path and not os.path.exists(key_path):
+            print(f"[forecasting][WARN] GOOGLE_APPLICATION_CREDENTIALS points to missing file: {key_path}. Ignoring and using ADC instead.")
+
+        # Temporarily clear the env var so google.auth.default() doesn't try to open the missing file again
+        original = os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        try:
+            credentials, project_id = google.auth.default()
+        finally:
+            if original is not None:
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = original
+
+    if not credentials.valid:
+        credentials.refresh(Request())
+    return credentials, project_id
+
+
+# -------------------------------------------------------------------
 # BigQuery loader
 # -------------------------------------------------------------------
 def _load_features_from_bigquery() -> Optional[Dict[str, Any]]:
     dataset_id = os.getenv("VERTEX_DATASET_ID", "solar_forcast_data")
     table_id = os.getenv("VERTEX_TABLE_ID", "daily_solar_output")
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "pristine-valve-477208-i1")
 
-    client = bigquery.Client(project=project_id)
+    credentials, adc_project = _get_adc_credentials()
+    project_id = (
+        os.getenv("BIGQUERY_PROJECT_ID")
+        or os.getenv("GOOGLE_CLOUD_PROJECT")
+        or adc_project
+    )
+
+    client = bigquery.Client(project=project_id, credentials=credentials)
 
     print(f"[forecasting] Loading features from BQ: {project_id}.{dataset_id}.{table_id}")
 
@@ -85,7 +124,9 @@ def _load_features_from_bigquery() -> Optional[Dict[str, Any]]:
 def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
     from google.cloud import aiplatform
 
-    project = os.getenv("VERTEX_PROJECT_ID", "pristine-valve-477208-i1")
+    credentials, adc_project = _get_adc_credentials()
+
+    project = os.getenv("VERTEX_PROJECT_ID") or adc_project
     location = os.getenv("VERTEX_LOCATION", "us-central1")
     endpoint_id = os.getenv("VERTEX_ENDPOINT_ID", "7273285910412656640")
 
@@ -95,7 +136,7 @@ def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
         else f"projects/{project}/locations/{location}/endpoints/{endpoint_id}"
     )
 
-    aiplatform.init(project=project, location=location)
+    aiplatform.init(project=project, location=location, credentials=credentials)
     endpoint = aiplatform.Endpoint(endpoint_path)
 
     print("[forecasting] Sending instance to Vertex AI:")
@@ -165,3 +206,13 @@ def forecast_solar(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     except Exception as e:
         print(f"[forecasting][ERROR] Vertex prediction failed: {e}")
         return {**_stub_forecast(), "error": str(e)}
+
+
+# -------------------------------------------------------------------
+# CLI entrypoint for quick manual runs
+# -------------------------------------------------------------------
+if __name__ == "__main__":
+    print("=== Forecasting module test ===")
+    result = forecast_solar()
+    print("\nForecast result:")
+    print(json.dumps(result, indent=2))
