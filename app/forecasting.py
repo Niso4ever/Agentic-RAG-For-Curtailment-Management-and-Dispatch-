@@ -7,8 +7,7 @@ import requests
 from dotenv import load_dotenv
 from google.cloud import bigquery
 import google.auth
-from google.auth.transport.requests import Request
-from google.oauth2 import service_account
+from google.auth.exceptions import DefaultCredentialsError
 
 # -------------------------------------------------------------------
 # Load .env file
@@ -30,6 +29,8 @@ ALLOWED_FEATURES = [
 DEFAULT_SERIES_ID = "725300"
 DEFAULT_LOCATION = "Abu Dhabi"
 OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
+DEFAULT_GCP_PROJECT = "pristine-valve-477208-i1"
+DEFAULT_VERTEX_LOCATION = "us-central1"
 
 
 # -------------------------------------------------------------------
@@ -90,34 +91,25 @@ def _build_vertex_instance(row: Dict[str, Any]) -> Dict[str, Any]:
     return instance
 
 
-# -------------------------------------------------------------------
-# Auth helpers
-# -------------------------------------------------------------------
-def _get_adc_credentials():
+def _resolve_project_id(*env_vars: str, fallback: str = DEFAULT_GCP_PROJECT) -> str:
     """
-    Prefer Application Default Credentials (gcloud auth application-default login).
-    Falls back to a service-account key file if provided. Ignores missing files.
+    Determine the Google Cloud project to use, preferring env vars and falling
+    back to Application Default Credentials. A hard-coded fallback maintains a
+    sane default for local/manual runs.
     """
-    key_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    for var in env_vars:
+        value = os.getenv(var)
+        if value:
+            return value
 
-    if key_path and os.path.exists(key_path):
-        credentials = service_account.Credentials.from_service_account_file(key_path)
-        project_id = credentials.project_id
-    else:
-        if key_path and not os.path.exists(key_path):
-            print(f"[forecasting][WARN] GOOGLE_APPLICATION_CREDENTIALS points to missing file: {key_path}. Ignoring and using ADC instead.")
+    try:
+        _, project_id = google.auth.default()
+        if project_id:
+            return project_id
+    except DefaultCredentialsError as exc:
+        print(f"[forecasting][WARN] Unable to resolve default GCP project via ADC: {exc}")
 
-        # Temporarily clear the env var so google.auth.default() doesn't try to open the missing file again
-        original = os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        try:
-            credentials, project_id = google.auth.default()
-        finally:
-            if original is not None:
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = original
-
-    if not credentials.valid:
-        credentials.refresh(Request())
-    return credentials, project_id
+    return fallback
 
 
 # -------------------------------------------------------------------
@@ -127,14 +119,11 @@ def _load_features_from_bigquery() -> Optional[Dict[str, Any]]:
     dataset_id = os.getenv("VERTEX_DATASET_ID", "solar_forcast_data")
     table_id = os.getenv("VERTEX_TABLE_ID", "daily_solar_output")
 
-    credentials, adc_project = _get_adc_credentials()
-    project_id = (
-        os.getenv("BIGQUERY_PROJECT_ID")
-        or os.getenv("GOOGLE_CLOUD_PROJECT")
-        or adc_project
+    project_id = _resolve_project_id(
+        "BIGQUERY_PROJECT_ID", "VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"
     )
 
-    client = bigquery.Client(project=project_id, credentials=credentials)
+    client = bigquery.Client(project=project_id)
 
     print(f"[forecasting] Loading features from BQ: {project_id}.{dataset_id}.{table_id}")
 
@@ -206,10 +195,8 @@ def _fetch_weather_features(location: str) -> Optional[Dict[str, Any]]:
 def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
     from google.cloud import aiplatform
 
-    credentials, adc_project = _get_adc_credentials()
-
-    project = os.getenv("VERTEX_PROJECT_ID") or adc_project
-    location = os.getenv("VERTEX_LOCATION", "us-central1")
+    project = _resolve_project_id("VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT")
+    location = os.getenv("VERTEX_LOCATION", DEFAULT_VERTEX_LOCATION)
     endpoint_id = os.getenv("VERTEX_ENDPOINT_ID", "7273285910412656640")
 
     endpoint_path = (
@@ -218,7 +205,7 @@ def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
         else f"projects/{project}/locations/{location}/endpoints/{endpoint_id}"
     )
 
-    aiplatform.init(project=project, location=location, credentials=credentials)
+    aiplatform.init(project=project, location=location)
     endpoint = aiplatform.Endpoint(endpoint_path)
 
     payload = {k: features.get(k) for k in ALLOWED_FEATURES}
