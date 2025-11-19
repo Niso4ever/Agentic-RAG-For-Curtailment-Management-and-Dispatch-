@@ -189,6 +189,15 @@ def _fetch_weather_features(location: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def get_latest_weather_features(location: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Public helper used by the agent loop to refresh real-time weather inputs
+    before each MILP solve. Defaults to OPENWEATHER_LOCATION when not provided.
+    """
+    resolved_location = location or os.getenv("OPENWEATHER_LOCATION", DEFAULT_LOCATION)
+    return _fetch_weather_features(resolved_location)
+
+
 # -------------------------------------------------------------------
 # Vertex AI predictor
 # -------------------------------------------------------------------

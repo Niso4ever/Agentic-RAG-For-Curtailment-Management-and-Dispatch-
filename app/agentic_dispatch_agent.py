@@ -2,8 +2,9 @@
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from statistics import mean
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 
 from app.llm_client import client, MODEL_NAME
 
@@ -13,6 +14,9 @@ except ImportError:  # pragma: no cover - optional dependency
     AuthenticationError = Exception  # type: ignore
 
 from app import agent_tools
+
+DEFAULT_SERIES_ID = os.getenv("DEFAULT_SERIES_ID", "725300")
+DEFAULT_DISPATCH_HORIZON_HOURS = int(os.getenv("DISPATCH_FORECAST_HORIZON", "4"))
 
 
 # ============================================================
@@ -124,6 +128,8 @@ def _run_local_stub_answer(user_query: str) -> str:
     }
 
     forecast = agent_tools.get_solar_forecast_stub()
+    weather = agent_tools.get_live_weather_features()
+    _ensure_dispatch_horizon(forecast, weather)
     rag = agent_tools.get_rag_insights_stub(user_query)
 
     # Build a MILP payload from forecast + rag + plant meta
@@ -131,6 +137,7 @@ def _run_local_stub_answer(user_query: str) -> str:
         forecast_output=forecast,
         rag_output=rag,
         plant_meta=plant_meta,
+        weather_features=weather,
     )
 
     # Hard override to guarantee we never pass zeros by mistake
@@ -287,6 +294,168 @@ def get_solar_forecast_prediction(
     return _naive_projection(historical_data, future_data)
 
 
+def _extract_cloud_cover(features: Optional[Dict[str, Any]]) -> Optional[float]:
+    if not isinstance(features, dict):
+        return None
+    candidates = [
+        features.get("cloud_cover"),
+        features.get("clouds"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, (int, float)):
+            return float(candidate)
+        if isinstance(candidate, dict):
+            value = candidate.get("all")
+            if isinstance(value, (int, float)):
+                return float(value)
+
+    debug = features.get("debug_weather_source")
+    if isinstance(debug, dict):
+        clouds = debug.get("clouds")
+        if isinstance(clouds, dict) and isinstance(clouds.get("all"), (int, float)):
+            return float(clouds["all"])
+        if isinstance(clouds, (int, float)):
+            return float(clouds)
+    return None
+
+
+def _parse_iso_timestamp(value: Optional[str]) -> datetime:
+    if isinstance(value, str) and value:
+        cleaned = value
+        if cleaned.endswith("Z"):
+            cleaned = cleaned[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(cleaned)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+
+def _coalesce_feature(
+    name: str,
+    primary: Optional[Dict[str, Any]],
+    secondary: Optional[Dict[str, Any]],
+    default: float,
+) -> float:
+    for source in (primary, secondary):
+        if isinstance(source, dict) and source.get(name) is not None:
+            try:
+                return float(source[name])
+            except (TypeError, ValueError):
+                continue
+    return float(default)
+
+
+def _build_timeseries_windows(
+    forecast: Dict[str, Any],
+    weather_features: Optional[Dict[str, Any]],
+    horizon_hours: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    features_used = forecast.get("features_used") or {}
+    base_timestamp = (
+        features_used.get("forecast_timestamp")
+        or (weather_features or {}).get("forecast_timestamp")
+    )
+    base_dt = _parse_iso_timestamp(base_timestamp)
+
+    base_temp = _coalesce_feature("mean_temperature", features_used, weather_features, 25.0)
+    base_wind = _coalesce_feature("mean_wind_speed", features_used, weather_features, 3.0)
+    base_cloud = _extract_cloud_cover(features_used)
+    if base_cloud is None:
+        base_cloud = _extract_cloud_cover(weather_features) or 20.0
+    base_series = (
+        features_used.get("series_id")
+        or (weather_features or {}).get("series_id")
+        or DEFAULT_SERIES_ID
+    )
+    base_mw = float(forecast.get("mw", 0.0) or 0.0)
+
+    historical: List[Dict[str, Any]] = []
+    for offset, scale in [(-2, 0.7), (-1, 0.85), (0, 1.0)]:
+        ts = (base_dt + timedelta(hours=offset)).date().isoformat()
+        historical.append(
+            {
+                "forecast_timestamp": ts,
+                "mean_temperature": base_temp,
+                "mean_wind_speed": base_wind,
+                "cloud_cover": base_cloud,
+                "series_id": base_series,
+                "target_solar_output": max(base_mw * scale, 0.0),
+            }
+        )
+
+    future: List[Dict[str, Any]] = []
+    total_horizon = max(1, int(horizon_hours))
+    for hour in range(1, total_horizon + 1):
+        ts = (base_dt + timedelta(hours=hour)).date().isoformat()
+        future.append(
+            {
+                "forecast_timestamp": ts,
+                "mean_temperature": base_temp,
+                "mean_wind_speed": base_wind,
+                "cloud_cover": base_cloud,
+                "series_id": base_series,
+            }
+        )
+
+    return historical, future
+
+
+def _ensure_dispatch_horizon(
+    forecast: Dict[str, Any],
+    weather_features: Optional[Dict[str, Any]],
+    horizon_hours: int = DEFAULT_DISPATCH_HORIZON_HOURS,
+) -> Dict[str, Any]:
+    try:
+        historical, future = _build_timeseries_windows(
+            forecast, weather_features, horizon_hours
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"Failed to build dispatch horizon ({exc}); using single-interval payload.")
+        return forecast
+
+    predictions = get_solar_forecast_prediction(historical, future)
+    if not predictions:
+        return forecast
+
+    confidence = float(forecast.get("confidence") or 0.5)
+    features_used = forecast.get("features_used") or {}
+    dispatch_intervals: List[Dict[str, Any]] = []
+    for idx, pred in enumerate(predictions):
+        base = future[idx] if idx < len(future) else {}
+        ts = pred.get("forecast_timestamp") or base.get("forecast_timestamp")
+        interval_features = {
+            "forecast_timestamp": ts,
+            "mean_temperature": pred.get("mean_temperature", base.get("mean_temperature")),
+            "mean_wind_speed": pred.get("mean_wind_speed", base.get("mean_wind_speed")),
+            "cloud_cover": pred.get("cloud_cover", base.get("cloud_cover")),
+            "series_id": pred.get("series_id", base.get("series_id") or features_used.get("series_id")),
+        }
+        interval_features = {
+            key: value for key, value in interval_features.items() if value is not None
+        }
+        dispatch_intervals.append(
+            {
+                "label": ts or f"t{idx}",
+                "mw_forecast": float(
+                    pred.get("target_solar_output")
+                    or forecast.get("mw")
+                    or 0.0
+                ),
+                "features": interval_features,
+                "confidence": confidence,
+            }
+        )
+
+    if dispatch_intervals:
+        forecast["dispatch_intervals"] = dispatch_intervals
+
+    return forecast
+
+
 # ============================================================
 # MAIN AGENT LOOP (LLM → tools → MILP → final answer)
 # ============================================================
@@ -343,6 +512,7 @@ def run_agentic_dispatch(user_query: str, plant_meta: Dict[str, Any] = None) -> 
 
     last_forecast: Dict[str, Any] = {}
     last_rag: Dict[str, Any] = {}
+    last_weather: Optional[Dict[str, Any]] = None
 
     while True:
         _debug_dump("Model output", response.output)
@@ -385,6 +555,8 @@ def run_agentic_dispatch(user_query: str, plant_meta: Dict[str, Any] = None) -> 
             # --------------------------------------------------------
             if name == "get_solar_forecast_stub":
                 result = agent_tools.get_solar_forecast_stub()
+                last_weather = agent_tools.get_live_weather_features()
+                _ensure_dispatch_horizon(result, last_weather)
                 last_forecast = result
 
             elif name == "get_rag_insights_stub":
@@ -395,14 +567,20 @@ def run_agentic_dispatch(user_query: str, plant_meta: Dict[str, Any] = None) -> 
                 # Ensure we have a forecast even if MILP is called first.
                 if not last_forecast:
                     last_forecast = agent_tools.get_solar_forecast_stub()
+                    last_weather = agent_tools.get_live_weather_features()
+                    _ensure_dispatch_horizon(last_forecast, last_weather)
                 if not last_rag:
                     last_rag = {}
+                # Always refresh weather immediately before optimization to capture live changes.
+                last_weather = agent_tools.get_live_weather_features()
+                _ensure_dispatch_horizon(last_forecast, last_weather)
 
                 # Build a MILP payload from forecast + rag + plant meta
                 milp_payload = agent_tools.prepare_milp_payload(
                     forecast_output=last_forecast,
                     rag_output=last_rag,
                     plant_meta=plant_meta,
+                    weather_features=last_weather,
                 )
 
                 # CRITICAL: Override any LLM / helper nonsense.
