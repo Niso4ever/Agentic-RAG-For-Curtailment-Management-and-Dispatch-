@@ -1,5 +1,4 @@
 # app/agent_tools.py
-
 """
 Central registry of the tools that the Agentic AI system calls.
 
@@ -20,6 +19,7 @@ from app.forecasting import (
 from app.rag_engine import retrieve_grounded_knowledge
 from app.milp_solver import solve_dispatch  # OR-Tools MILP version
 
+FORECAST_HORIZON = 6
 BASE_CURTAILMENT_WEIGHT = 1000.0
 BASE_CYCLE_PENALTY = 1.0
 
@@ -28,19 +28,52 @@ BASE_CYCLE_PENALTY = 1.0
 # SOLAR FORECAST TOOL
 # =====================================================================
 
+def _default_interval(label: str) -> Dict[str, Any]:
+    return {
+        "label": label,
+        "mw_forecast": 0.0,
+        "confidence": 0.0,
+        "features_used": {},
+    }
+
+
 def get_solar_forecast_stub() -> Dict[str, Any]:
     """
     Wrapper tool — returns dictionary so LLM can consume it.
     If Vertex AI is configured, forecast_solar() uses real prediction.
     """
     try:
-        return forecast_solar()
+        forecast = forecast_solar()
     except Exception as e:
+        intervals = [_default_interval(f"t{idx}") for idx in range(FORECAST_HORIZON)]
         return {
             "error": f"Forecasting error: {str(e)}",
             "mw": 0.0,
-            "confidence": 0.0
+            "confidence": 0.0,
+            "source": "stub",
+            "features_used": {},
+            "intervals": intervals,
+            "dispatch_intervals": intervals,
+            "horizon": FORECAST_HORIZON,
         }
+
+    intervals = forecast.get("intervals") or forecast.get("dispatch_intervals") or []
+    if not intervals:
+        intervals = [_default_interval(f"t{idx}") for idx in range(FORECAST_HORIZON)]
+
+    normalized_intervals = intervals[:FORECAST_HORIZON]
+    while len(normalized_intervals) < FORECAST_HORIZON:
+        normalized_intervals.append(dict(normalized_intervals[-1]))
+
+    forecast["intervals"] = normalized_intervals
+    forecast["dispatch_intervals"] = normalized_intervals
+    forecast["horizon"] = len(normalized_intervals)
+    forecast["mw"] = float(normalized_intervals[0]["mw_forecast"]) if normalized_intervals else 0.0
+    forecast["confidence"] = (
+        float(normalized_intervals[0].get("confidence", 0.5)) if normalized_intervals else 0.0
+    )
+
+    return forecast
 
 
 def get_live_weather_features() -> Optional[Dict[str, Any]]:
@@ -53,6 +86,10 @@ def get_live_weather_features() -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+
+# =====================================================================
+# PAYLOAD BUILDER — sends correct input to MILP
+# =====================================================================
 
 def prepare_milp_payload(
     forecast_output: Dict[str, Any],
@@ -79,41 +116,43 @@ def prepare_milp_payload(
         plant_meta.get("interconnect_limit_mw") or plant_rating
     )
 
-    interval_sources: List[Dict[str, Any]] = []
+    bess_soc = float(plant_meta.get("soc", 0.35))
+    bess_capacity = float(plant_meta.get("capacity_mwh", 50.0))
+    max_charge = float(plant_meta.get("max_charge_mw", 5.0))
+    max_discharge = float(plant_meta.get("max_discharge_mw", 5.0))
 
-    # Allow callers to supply an explicit interval list; otherwise, fall back to a single step.
-    forecast_intervals = forecast_output.get("dispatch_intervals") or []
-    if isinstance(forecast_intervals, list) and forecast_intervals:
-        interval_sources.extend(forecast_intervals)
-
+    interval_sources = forecast_output.get("intervals") or forecast_output.get("dispatch_intervals") or []
     if not interval_sources:
-        merged_weather = {**features_used, **(weather_features or {})}
-        interval_sources.append(
-            {
-                "label": "t0",
-                "mw_forecast": mw_forecast,
-                "features": merged_weather,
-                "confidence": confidence,
-            }
-        )
+        interval_sources = [_default_interval(f"t{idx}") for idx in range(FORECAST_HORIZON)]
 
     dispatch_intervals: List[Dict[str, Any]] = []
-    for idx, interval in enumerate(interval_sources):
-        interval_mw = float(interval.get("mw_forecast", mw_forecast) or 0.0)
-        interval_conf = float(interval.get("confidence", confidence) or confidence)
+    for idx in range(FORECAST_HORIZON):
+        source_interval = (
+            dict(interval_sources[idx])
+            if idx < len(interval_sources)
+            else dict(interval_sources[-1])
+        )
+        interval_mw = float(source_interval.get("mw_forecast", mw_forecast) or mw_forecast)
+        interval_conf = float(source_interval.get("confidence", confidence) or confidence)
         interval_conf = max(0.0, min(interval_conf, 1.0))
-        interval_features = interval.get("features") or interval.get("features_used") or features_used
+        interval_features = (
+            dict(source_interval.get("features_used"))
+            if isinstance(source_interval.get("features_used"), dict)
+            else dict(source_interval.get("features") or features_used)
+        )
+        if not interval_features:
+            interval_features = {**features_used, **(weather_features or {})}
 
         irradiance_factor = _estimate_irradiance_factor(
-            interval_features or {},
-            fallback_mw=interval_mw or mw_forecast,
+            interval_features,
+            fallback_mw=interval_mw,
             plant_rating=plant_rating,
         )
         dynamic_grid_limit = min(interconnect_limit, irradiance_factor * plant_rating)
 
         dispatch_intervals.append(
             {
-                "label": interval.get("label", f"t{idx}"),
+                "label": source_interval.get("label", f"t{idx}"),
                 "mw_forecast": interval_mw,
                 "grid_limit_mw": max(dynamic_grid_limit, 0.0),
                 "curtailment_weight": max(
@@ -124,15 +163,16 @@ def prepare_milp_payload(
                 ),
                 "irradiance_factor": irradiance_factor,
                 "forecast_confidence": interval_conf,
+                "features": interval_features,
             }
         )
 
     payload = {
         "mw_forecast": dispatch_intervals[0]["mw_forecast"],
-        "bess_soc": plant_meta.get("soc", 0.35),
-        "bess_capacity_mwh": plant_meta.get("capacity_mwh", 50.0),
-        "max_charge_mw": plant_meta.get("max_charge_mw", 5.0),
-        "max_discharge_mw": plant_meta.get("max_discharge_mw", 5.0),
+        "bess_soc": bess_soc,
+        "bess_capacity_mwh": bess_capacity,
+        "max_charge_mw": max_charge,
+        "max_discharge_mw": max_discharge,
         "dispatch_intervals": dispatch_intervals,
         "interconnect_limit_mw": interconnect_limit,
         "plant_rating_mw": plant_rating,

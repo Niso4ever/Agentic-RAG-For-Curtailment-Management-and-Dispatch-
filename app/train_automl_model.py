@@ -1,6 +1,7 @@
 import os
 
-import google.cloud.aiplatform as aiplatform
+import vertexai
+from google.cloud import aiplatform
 
 PROJECT_ID = "pristine-valve-477208-i1"
 REGION = "us-central1"
@@ -22,7 +23,7 @@ def train_automl_tabular_model(
     target_column: str,
     training_budget_milli_node_hours: int,
 ):
-    aiplatform.init(project=project, location=location)
+    vertexai.init(project=project, location=location)
 
     # Load the existing dataset
     dataset = aiplatform.TabularDataset(dataset_resource_name)

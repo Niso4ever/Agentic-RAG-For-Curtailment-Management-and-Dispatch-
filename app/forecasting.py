@@ -1,7 +1,7 @@
 import json
 import os
-from typing import Any, Dict, Optional
-from datetime import datetime, date, timezone
+from typing import Any, Dict, Optional, List
+from datetime import datetime, date, timezone, timedelta
 
 import requests
 from dotenv import load_dotenv
@@ -32,11 +32,15 @@ OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 DEFAULT_GCP_PROJECT = "pristine-valve-477208-i1"
 DEFAULT_VERTEX_LOCATION = "us-central1"
 
+# Multi-interval horizon length
+HORIZON_INTERVALS = 6
+
 
 # -------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------
-def _stub_forecast() -> Dict[str, float]:
+def _stub_forecast_single() -> Dict[str, float]:
+    """Single-point stub forecast used when Vertex is unavailable."""
     return {"mw": 13.23, "confidence": 0.0, "source": "stub"}
 
 
@@ -199,9 +203,14 @@ def get_latest_weather_features(location: Optional[str] = None) -> Optional[Dict
 
 
 # -------------------------------------------------------------------
-# Vertex AI predictor
+# Vertex AI predictor (single-point)
 # -------------------------------------------------------------------
-def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
+def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Single-point AutoML Tabular regression call. The multi-interval horizon
+    is constructed in forecast_solar() using this base prediction.
+    """
+    import vertexai
     from google.cloud import aiplatform
 
     project = _resolve_project_id("VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT")
@@ -214,7 +223,7 @@ def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
         else f"projects/{project}/locations/{location}/endpoints/{endpoint_id}"
     )
 
-    aiplatform.init(project=project, location=location)
+    vertexai.init(project=project, location=location)
     endpoint = aiplatform.Endpoint(endpoint_path)
 
     payload = {k: features.get(k) for k in ALLOWED_FEATURES}
@@ -229,7 +238,7 @@ def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
 
     raw = prediction.predictions[0]
 
-    # AutoML Tabular regression → no confidence scores → assign default
+    # AutoML Tabular regression → no native confidence scores → assign default
     confidence = 0.90
 
     if isinstance(raw, dict):
@@ -250,18 +259,98 @@ def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, float]:
 
 
 # -------------------------------------------------------------------
-# Main forecasting function
+# Multi-interval helper
+# -------------------------------------------------------------------
+def _build_horizon_from_single(
+    base_mw: float,
+    confidence: float,
+    features_used: Dict[str, Any],
+    horizon: int = HORIZON_INTERVALS,
+) -> List[Dict[str, Any]]:
+    """
+    Construct a simple 6-interval horizon from a single-point forecast.
+
+    For now we keep all 6 intervals at the same MW value. This makes the MILP
+    genuinely multi-interval (SoC evolves over time) while the forecast stays
+    consistent with the underlying single-point AutoML model.
+    """
+    base_label = features_used.get("forecast_timestamp") or datetime.now(timezone.utc).date().isoformat()
+    intervals: List[Dict[str, Any]] = []
+
+    # Use hourly steps for labels (even though AutoML is daily) just to
+    # provide distinct identifiers per interval.
+    base_dt = datetime.strptime(str(base_label), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    for i in range(horizon):
+        label_dt = base_dt + timedelta(hours=i)
+        label_str = label_dt.isoformat(timespec="minutes").replace("+00:00", "Z")
+        intervals.append(
+            {
+                "label": label_str,
+                "mw_forecast": float(base_mw),
+                "features": dict(features_used),
+                "confidence": confidence,
+            }
+        )
+    return intervals
+
+
+# -------------------------------------------------------------------
+# Main forecasting function (multi-interval)
 # -------------------------------------------------------------------
 def forecast_solar(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Return a 6-interval solar forecast horizon.
+
+    Structure:
+    {
+      "mw": <float>,                     # representative forecast (first interval)
+      "confidence": <0-1>,
+      "source": "vertex" | "stub",
+      "features_used": {...},            # base features passed to Vertex
+      "dispatch_intervals": [
+          {
+             "label": "...",
+             "mw_forecast": <float>,
+             "features": {...},
+             "confidence": <0-1>
+          },
+          ... (6 intervals total)
+      ]
+    }
+    """
     provider = os.getenv("FORECAST_PROVIDER", "vertex").lower()
     print(f"[forecasting] Using provider: {provider}")
 
-    if provider == "stub":
-        return _stub_forecast()
-
     location = os.getenv("OPENWEATHER_LOCATION", DEFAULT_LOCATION)
 
-    # Prefer live weather → explicit overrides → BigQuery fallback.
+    if provider == "stub":
+        # Stub provider produces a simple flat 6-interval horizon.
+        base = _stub_forecast_single()
+        base_mw = float(base.get("mw", 0.0) or 0.0)
+        confidence = float(base.get("confidence", 0.0) or 0.0)
+        features_used: Dict[str, Any] = {
+            "forecast_timestamp": datetime.now(timezone.utc).date().isoformat(),
+            "mean_temperature": 25.0,
+            "mean_wind_speed": 2.0,
+            "series_id": DEFAULT_SERIES_ID,
+            "target_solar_output": None,
+        }
+        intervals = _build_horizon_from_single(
+            base_mw=base_mw,
+            confidence=confidence,
+            features_used=features_used,
+            horizon=HORIZON_INTERVALS,
+        )
+        return {
+            "mw": base_mw,
+            "confidence": confidence,
+            "source": "stub",
+            "features_used": features_used,
+            "dispatch_intervals": intervals,
+        }
+
+    # Real provider → prefer live weather → explicit overrides → BigQuery fallback.
     row = (
         _fetch_weather_features(location)
         or features
@@ -269,7 +358,31 @@ def forecast_solar(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     )
 
     if not row:
-        return {**_stub_forecast(), "note": "No weather/BQ features"}
+        # No inputs at all → fall back to stub horizon
+        base = _stub_forecast_single()
+        base_mw = float(base.get("mw", 0.0) or 0.0)
+        confidence = float(base.get("confidence", 0.0) or 0.0)
+        features_used = {
+            "forecast_timestamp": datetime.now(timezone.utc).date().isoformat(),
+            "mean_temperature": 25.0,
+            "mean_wind_speed": 2.0,
+            "series_id": DEFAULT_SERIES_ID,
+            "target_solar_output": None,
+        }
+        intervals = _build_horizon_from_single(
+            base_mw=base_mw,
+            confidence=confidence,
+            features_used=features_used,
+            horizon=HORIZON_INTERVALS,
+        )
+        return {
+            "mw": base_mw,
+            "confidence": confidence,
+            "source": "stub-no-inputs",
+            "features_used": features_used,
+            "dispatch_intervals": intervals,
+            "note": "No weather/BQ features; using stub horizon.",
+        }
 
     instance = _build_vertex_instance(row)
 
@@ -277,17 +390,51 @@ def forecast_solar(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     print(json.dumps({k: v for k, v in instance.items() if k in ALLOWED_FEATURES}, indent=2))
 
     try:
-        return _predict_with_vertex(instance)
+        base_pred = _predict_with_vertex(instance)
+        base_mw = float(base_pred.get("mw", 0.0) or 0.0)
+        confidence = float(base_pred.get("confidence", 0.9) or 0.9)
+        confidence = max(0.0, min(confidence, 1.0))
+        features_used = dict(base_pred.get("features_used") or instance)
+        intervals = _build_horizon_from_single(
+            base_mw=base_mw,
+            confidence=confidence,
+            features_used=features_used,
+            horizon=HORIZON_INTERVALS,
+        )
+        return {
+            "mw": base_mw,
+            "confidence": confidence,
+            "source": base_pred.get("source", "vertex"),
+            "features_used": features_used,
+            "dispatch_intervals": intervals,
+        }
     except Exception as e:
         print(f"[forecasting][ERROR] Vertex prediction failed: {e}")
-        return {**_stub_forecast(), "error": str(e)}
+        base = _stub_forecast_single()
+        base_mw = float(base.get("mw", 0.0) or 0.0)
+        confidence = float(base.get("confidence", 0.0) or 0.0)
+        features_used = instance
+        intervals = _build_horizon_from_single(
+            base_mw=base_mw,
+            confidence=confidence,
+            features_used=features_used,
+            horizon=HORIZON_INTERVALS,
+        )
+        return {
+            "mw": base_mw,
+            "confidence": confidence,
+            "source": "stub-on-vertex-error",
+            "features_used": features_used,
+            "dispatch_intervals": intervals,
+            "error": str(e),
+        }
 
 
 # -------------------------------------------------------------------
 # CLI entrypoint for quick manual runs
 # -------------------------------------------------------------------
 if __name__ == "__main__":
-    print("=== Forecasting module test ===")
+    print("=== Forecasting module test (6-interval horizon) ===")
     result = forecast_solar()
     print("\nForecast result:")
     print(json.dumps(result, indent=2))

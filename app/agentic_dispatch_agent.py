@@ -1,10 +1,7 @@
-# app/agentic_dispatch_agent.py
-
 import json
 import os
-from datetime import datetime, timedelta, timezone
 from statistics import mean
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 from app.llm_client import client, MODEL_NAME
 
@@ -14,9 +11,6 @@ except ImportError:  # pragma: no cover - optional dependency
     AuthenticationError = Exception  # type: ignore
 
 from app import agent_tools
-
-DEFAULT_SERIES_ID = os.getenv("DEFAULT_SERIES_ID", "725300")
-DEFAULT_DISPATCH_HORIZON_HOURS = int(os.getenv("DISPATCH_FORECAST_HORIZON", "4"))
 
 
 # ============================================================
@@ -35,7 +29,7 @@ def _get_tool_definitions() -> List[Dict[str, Any]]:
             "name": "get_solar_forecast_stub",
             "type": "function",
             "description": (
-                "Retrieve short-term solar forecast (MW and confidence) "
+                "Retrieve short-term solar forecast (MW and confidence) over a 6-interval horizon "
                 "using the live forecasting pipeline when available."
             ),
             "parameters": {
@@ -63,8 +57,8 @@ def _get_tool_definitions() -> List[Dict[str, Any]]:
             "name": "solve_milp_dispatch_stub",
             "type": "function",
             "description": (
-                "Run MILP-based dispatch optimization using OR-Tools. "
-                "Takes the solar forecast, BESS SoC/capacity, and charge/discharge limits."
+                "Run multi-interval MILP-based dispatch optimization using OR-Tools. "
+                "Takes the solar forecast horizon, BESS SoC/capacity, and charge/discharge limits."
             ),
             "parameters": {
                 "type": "object",
@@ -74,6 +68,21 @@ def _get_tool_definitions() -> List[Dict[str, Any]]:
                     "bess_capacity_mwh": {"type": "number"},
                     "max_charge_mw": {"type": "number"},
                     "max_discharge_mw": {"type": "number"},
+                    # The agent loop will override this with a trusted payload,
+                    # but we expose it here so the schema is explicit.
+                    "dispatch_intervals": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "mw_forecast": {"type": "number"},
+                                "grid_limit_mw": {"type": "number"},
+                                "curtailment_weight": {"type": "number"},
+                                "cycle_penalty": {"type": "number"},
+                            },
+                        },
+                    },
                 },
                 "required": [
                     "mw_forecast",
@@ -129,7 +138,6 @@ def _run_local_stub_answer(user_query: str) -> str:
 
     forecast = agent_tools.get_solar_forecast_stub()
     weather = agent_tools.get_live_weather_features()
-    _ensure_dispatch_horizon(forecast, weather)
     rag = agent_tools.get_rag_insights_stub(user_query)
 
     # Build a MILP payload from forecast + rag + plant meta
@@ -166,7 +174,7 @@ Set OPENAI_API_KEY and install the OpenAI SDK to enable real model usage.
 
 
 # ============================================================
-# SOLAR FORECAST PREDICTION (historical + future rows helpers)
+# SOLAR FORECAST PREDICTION (legacy helpers — kept for compatibility)
 # ============================================================
 
 
@@ -221,11 +229,12 @@ def _vertex_timeseries_prediction(
         raise ValueError("Missing VERTEX_PROJECT_ID or VERTEX_ENDPOINT_ID for Vertex inference")
 
     try:
+        import vertexai
         from google.cloud import aiplatform
     except Exception as exc:  # pragma: no cover - optional dependency
         raise ImportError("google-cloud-aiplatform is not installed") from exc
 
-    aiplatform.init(project=project, location=location)
+    vertexai.init(project=project, location=location)
 
     endpoint_path = (
         endpoint_id
@@ -294,168 +303,6 @@ def get_solar_forecast_prediction(
     return _naive_projection(historical_data, future_data)
 
 
-def _extract_cloud_cover(features: Optional[Dict[str, Any]]) -> Optional[float]:
-    if not isinstance(features, dict):
-        return None
-    candidates = [
-        features.get("cloud_cover"),
-        features.get("clouds"),
-    ]
-    for candidate in candidates:
-        if isinstance(candidate, (int, float)):
-            return float(candidate)
-        if isinstance(candidate, dict):
-            value = candidate.get("all")
-            if isinstance(value, (int, float)):
-                return float(value)
-
-    debug = features.get("debug_weather_source")
-    if isinstance(debug, dict):
-        clouds = debug.get("clouds")
-        if isinstance(clouds, dict) and isinstance(clouds.get("all"), (int, float)):
-            return float(clouds["all"])
-        if isinstance(clouds, (int, float)):
-            return float(clouds)
-    return None
-
-
-def _parse_iso_timestamp(value: Optional[str]) -> datetime:
-    if isinstance(value, str) and value:
-        cleaned = value
-        if cleaned.endswith("Z"):
-            cleaned = cleaned[:-1] + "+00:00"
-        try:
-            parsed = datetime.fromisoformat(cleaned)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed
-        except ValueError:
-            pass
-    return datetime.now(timezone.utc)
-
-
-def _coalesce_feature(
-    name: str,
-    primary: Optional[Dict[str, Any]],
-    secondary: Optional[Dict[str, Any]],
-    default: float,
-) -> float:
-    for source in (primary, secondary):
-        if isinstance(source, dict) and source.get(name) is not None:
-            try:
-                return float(source[name])
-            except (TypeError, ValueError):
-                continue
-    return float(default)
-
-
-def _build_timeseries_windows(
-    forecast: Dict[str, Any],
-    weather_features: Optional[Dict[str, Any]],
-    horizon_hours: int,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    features_used = forecast.get("features_used") or {}
-    base_timestamp = (
-        features_used.get("forecast_timestamp")
-        or (weather_features or {}).get("forecast_timestamp")
-    )
-    base_dt = _parse_iso_timestamp(base_timestamp)
-
-    base_temp = _coalesce_feature("mean_temperature", features_used, weather_features, 25.0)
-    base_wind = _coalesce_feature("mean_wind_speed", features_used, weather_features, 3.0)
-    base_cloud = _extract_cloud_cover(features_used)
-    if base_cloud is None:
-        base_cloud = _extract_cloud_cover(weather_features) or 20.0
-    base_series = (
-        features_used.get("series_id")
-        or (weather_features or {}).get("series_id")
-        or DEFAULT_SERIES_ID
-    )
-    base_mw = float(forecast.get("mw", 0.0) or 0.0)
-
-    historical: List[Dict[str, Any]] = []
-    for offset, scale in [(-2, 0.7), (-1, 0.85), (0, 1.0)]:
-        ts = (base_dt + timedelta(hours=offset)).date().isoformat()
-        historical.append(
-            {
-                "forecast_timestamp": ts,
-                "mean_temperature": base_temp,
-                "mean_wind_speed": base_wind,
-                "cloud_cover": base_cloud,
-                "series_id": base_series,
-                "target_solar_output": max(base_mw * scale, 0.0),
-            }
-        )
-
-    future: List[Dict[str, Any]] = []
-    total_horizon = max(1, int(horizon_hours))
-    for hour in range(1, total_horizon + 1):
-        ts = (base_dt + timedelta(hours=hour)).date().isoformat()
-        future.append(
-            {
-                "forecast_timestamp": ts,
-                "mean_temperature": base_temp,
-                "mean_wind_speed": base_wind,
-                "cloud_cover": base_cloud,
-                "series_id": base_series,
-            }
-        )
-
-    return historical, future
-
-
-def _ensure_dispatch_horizon(
-    forecast: Dict[str, Any],
-    weather_features: Optional[Dict[str, Any]],
-    horizon_hours: int = DEFAULT_DISPATCH_HORIZON_HOURS,
-) -> Dict[str, Any]:
-    try:
-        historical, future = _build_timeseries_windows(
-            forecast, weather_features, horizon_hours
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        print(f"Failed to build dispatch horizon ({exc}); using single-interval payload.")
-        return forecast
-
-    predictions = get_solar_forecast_prediction(historical, future)
-    if not predictions:
-        return forecast
-
-    confidence = float(forecast.get("confidence") or 0.5)
-    features_used = forecast.get("features_used") or {}
-    dispatch_intervals: List[Dict[str, Any]] = []
-    for idx, pred in enumerate(predictions):
-        base = future[idx] if idx < len(future) else {}
-        ts = pred.get("forecast_timestamp") or base.get("forecast_timestamp")
-        interval_features = {
-            "forecast_timestamp": ts,
-            "mean_temperature": pred.get("mean_temperature", base.get("mean_temperature")),
-            "mean_wind_speed": pred.get("mean_wind_speed", base.get("mean_wind_speed")),
-            "cloud_cover": pred.get("cloud_cover", base.get("cloud_cover")),
-            "series_id": pred.get("series_id", base.get("series_id") or features_used.get("series_id")),
-        }
-        interval_features = {
-            key: value for key, value in interval_features.items() if value is not None
-        }
-        dispatch_intervals.append(
-            {
-                "label": ts or f"t{idx}",
-                "mw_forecast": float(
-                    pred.get("target_solar_output")
-                    or forecast.get("mw")
-                    or 0.0
-                ),
-                "features": interval_features,
-                "confidence": confidence,
-            }
-        )
-
-    if dispatch_intervals:
-        forecast["dispatch_intervals"] = dispatch_intervals
-
-    return forecast
-
-
 # ============================================================
 # MAIN AGENT LOOP (LLM → tools → MILP → final answer)
 # ============================================================
@@ -465,10 +312,11 @@ def run_agentic_dispatch(user_query: str, plant_meta: Dict[str, Any] = None) -> 
     """
     Main entrypoint for the Agentic Dispatch analysis.
 
-    CRITICAL GUARANTEE:
-    - The MW forecast used by the MILP solver is ALWAYS taken from the
+    CRITICAL GUARANTEES:
+    - The MW forecast horizon used by the MILP solver is ALWAYS taken from the
       latest forecast tool output (agent_tools.get_solar_forecast_stub),
       never from LLM-generated arguments.
+    - Multi-interval MILP is used (6 intervals when available).
     """
     plant_meta = plant_meta or {
         "soc": 0.35,
@@ -491,13 +339,15 @@ def run_agentic_dispatch(user_query: str, plant_meta: Dict[str, Any] = None) -> 
                     "content": (
                         "You are an Agentic AI system specializing in curtailment and BESS dispatch optimization.\n"
                         "Follow this strict sequence for EVERY request:\n"
-                        "  1. Call get_solar_forecast_stub (forecast)\n"
+                        "  1. Call get_solar_forecast_stub (obtain a 6-interval solar forecast horizon)\n"
                         "  2. Call get_rag_insights_stub with the user query\n"
-                        "  3. Call solve_milp_dispatch_stub using the BESS parameters from the user "
-                        "(default to 50 MWh capacity and 35% SoC when unspecified).\n"
+                        "  3. Call solve_milp_dispatch_stub using ONLY the BESS parameters from the user "
+                        "(default to 50 MWh capacity and 35% SoC when unspecified) and the horizon prepared "
+                        "by the tools.\n"
                         "Only after all THREE tool outputs are available may you craft a final answer.\n"
-                        "Your answer must explicitly reference the forecast, retrieved insights, "
-                        "and MILP dispatch recommendation."
+                        "Your answer must explicitly reference the forecast horizon, retrieved insights, "
+                        "and the multi-interval MILP dispatch recommendation (including curtailment behaviour "
+                        "and SoC evolution)."
                     ),
                 },
                 {"role": "user", "content": user_query},
@@ -513,6 +363,7 @@ def run_agentic_dispatch(user_query: str, plant_meta: Dict[str, Any] = None) -> 
     last_forecast: Dict[str, Any] = {}
     last_rag: Dict[str, Any] = {}
     last_weather: Optional[Dict[str, Any]] = None
+    milp_payload: Optional[Dict[str, Any]] = None
 
     while True:
         _debug_dump("Model output", response.output)
@@ -555,8 +406,6 @@ def run_agentic_dispatch(user_query: str, plant_meta: Dict[str, Any] = None) -> 
             # --------------------------------------------------------
             if name == "get_solar_forecast_stub":
                 result = agent_tools.get_solar_forecast_stub()
-                last_weather = agent_tools.get_live_weather_features()
-                _ensure_dispatch_horizon(result, last_weather)
                 last_forecast = result
 
             elif name == "get_rag_insights_stub":
@@ -567,13 +416,10 @@ def run_agentic_dispatch(user_query: str, plant_meta: Dict[str, Any] = None) -> 
                 # Ensure we have a forecast even if MILP is called first.
                 if not last_forecast:
                     last_forecast = agent_tools.get_solar_forecast_stub()
-                    last_weather = agent_tools.get_live_weather_features()
-                    _ensure_dispatch_horizon(last_forecast, last_weather)
                 if not last_rag:
                     last_rag = {}
                 # Always refresh weather immediately before optimization to capture live changes.
                 last_weather = agent_tools.get_live_weather_features()
-                _ensure_dispatch_horizon(last_forecast, last_weather)
 
                 # Build a MILP payload from forecast + rag + plant meta
                 milp_payload = agent_tools.prepare_milp_payload(
@@ -584,8 +430,8 @@ def run_agentic_dispatch(user_query: str, plant_meta: Dict[str, Any] = None) -> 
                 )
 
                 # CRITICAL: Override any LLM / helper nonsense.
-                mw_forecast = float(last_forecast.get("mw", 0.0) or 0.0)
-                milp_payload["mw_forecast"] = mw_forecast
+                mw_forecast_top = float(last_forecast.get("mw", 0.0) or 0.0)
+                milp_payload["mw_forecast"] = mw_forecast_top
                 milp_payload["bess_capacity_mwh"] = float(
                     plant_meta.get("capacity_mwh", 50.0)
                 )
