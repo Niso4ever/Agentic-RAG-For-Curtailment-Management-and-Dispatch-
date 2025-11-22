@@ -6,8 +6,8 @@ from datetime import datetime, date, timezone, timedelta
 import requests
 from dotenv import load_dotenv
 from google.cloud import bigquery
-import google.auth
 from google.auth.exceptions import DefaultCredentialsError
+import google.auth
 
 # -------------------------------------------------------------------
 # Load .env file
@@ -105,14 +105,12 @@ def _resolve_project_id(*env_vars: str, fallback: str = DEFAULT_GCP_PROJECT) -> 
         value = os.getenv(var)
         if value:
             return value
-
     try:
         _, project_id = google.auth.default()
         if project_id:
             return project_id
     except DefaultCredentialsError as exc:
         print(f"[forecasting][WARN] Unable to resolve default GCP project via ADC: {exc}")
-
     return fallback
 
 
@@ -120,6 +118,11 @@ def _resolve_project_id(*env_vars: str, fallback: str = DEFAULT_GCP_PROJECT) -> 
 # BigQuery loader
 # -------------------------------------------------------------------
 def _load_features_from_bigquery() -> Optional[Dict[str, Any]]:
+    # Opt out by default to avoid ADC/service-account dependencies.
+    if os.getenv("ENABLE_BIGQUERY", "").lower() not in ("1", "true", "yes"):
+        print("[forecasting] Skipping BigQuery load (ENABLE_BIGQUERY not set).")
+        return None
+
     dataset_id = os.getenv("VERTEX_DATASET_ID", "solar_forcast_data")
     table_id = os.getenv("VERTEX_TABLE_ID", "daily_solar_output")
 
@@ -127,7 +130,14 @@ def _load_features_from_bigquery() -> Optional[Dict[str, Any]]:
         "BIGQUERY_PROJECT_ID", "VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"
     )
 
-    client = bigquery.Client(project=project_id)
+    try:
+        client = bigquery.Client(project=project_id)
+    except DefaultCredentialsError as exc:
+        print(f"[forecasting][WARN] Skipping BigQuery fetch (no ADC credentials): {exc}")
+        return None
+    except Exception as exc:
+        print(f"[forecasting][WARN] Skipping BigQuery fetch (client init failed): {exc}")
+        return None
 
     print(f"[forecasting] Loading features from BQ: {project_id}.{dataset_id}.{table_id}")
 
@@ -210,9 +220,6 @@ def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, Any]:
     Single-point AutoML Tabular regression call. The multi-interval horizon
     is constructed in forecast_solar() using this base prediction.
     """
-    import vertexai
-    from google.cloud import aiplatform
-
     project = _resolve_project_id("VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT")
     location = os.getenv("VERTEX_LOCATION", DEFAULT_VERTEX_LOCATION)
     endpoint_id = os.getenv("VERTEX_ENDPOINT_ID", "7273285910412656640")
@@ -223,14 +230,22 @@ def _predict_with_vertex(features: Dict[str, Any]) -> Dict[str, Any]:
         else f"projects/{project}/locations/{location}/endpoints/{endpoint_id}"
     )
 
-    vertexai.init(project=project, location=location)
-    endpoint = aiplatform.Endpoint(endpoint_path)
-
     payload = {k: features.get(k) for k in ALLOWED_FEATURES}
 
     print("[forecasting] Sending instance to Vertex AI:")
     print(json.dumps(payload, indent=2))
 
+    import vertexai
+    from google.cloud import aiplatform
+
+    try:
+        vertexai.init(project=project, location=location)
+    except DefaultCredentialsError as exc:
+        raise RuntimeError(
+            "Vertex ADC credentials not available. Set GOOGLE_APPLICATION_CREDENTIALS or run `gcloud auth application-default login`."
+        ) from exc
+
+    endpoint = aiplatform.Endpoint(endpoint_path)
     prediction = endpoint.predict(instances=[payload])
 
     if not prediction.predictions:
@@ -409,7 +424,8 @@ def forecast_solar(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "dispatch_intervals": intervals,
         }
     except Exception as e:
-        print(f"[forecasting][ERROR] Vertex prediction failed: {e}")
+        error_msg = str(e)
+        print(f"[forecasting][ERROR] Vertex prediction failed: {error_msg}")
         base = _stub_forecast_single()
         base_mw = float(base.get("mw", 0.0) or 0.0)
         confidence = float(base.get("confidence", 0.0) or 0.0)
@@ -426,7 +442,7 @@ def forecast_solar(features: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
             "source": "stub-on-vertex-error",
             "features_used": features_used,
             "dispatch_intervals": intervals,
-            "error": str(e),
+            "error": error_msg,
         }
 
 
