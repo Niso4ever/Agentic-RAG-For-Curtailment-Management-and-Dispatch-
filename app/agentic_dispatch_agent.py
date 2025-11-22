@@ -292,7 +292,7 @@ def get_solar_forecast_prediction(
     Predict solar output for the provided future horizon.
     Uses Vertex AI when configured; otherwise falls back to a simple local extrapolation.
     """
-    provider = os.getenv("FORECAST_PROVIDER", "stub").lower()
+    provider = os.getenv("FORECAST_PROVIDER", "vertex").lower()
 
     if provider == "vertex":
         try:
