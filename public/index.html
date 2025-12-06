@@ -239,6 +239,29 @@
         <section class="panel">
             <h2>Operator Query</h2>
             <div class="form-group">
+                <label>Quick Prompts</label>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-bottom: 1rem;">
+                    <button type="button"
+                        onclick="setPrompt('Solar forecast is higher than our grid envelope for the next 4 hours.', {soc: 35})"
+                        style="padding: 0.5rem; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--border); color: var(--text);">
+                        📈 High Clipping
+                    </button>
+                    <button type="button"
+                        onclick="setPrompt('Grid operator just issued a 10MW export limit due to congestion. Adjust dispatch immediately.', {soc: 35})"
+                        style="padding: 0.5rem; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--border); color: var(--text);">
+                        🚧 Congestion
+                    </button>
+                    <button type="button"
+                        onclick="setPrompt('Ambient temperature is 50°C. Does this affect our inverter efficiency or BESS cycle cost? (Override Temp=50)', {soc: 35})"
+                        style="padding: 0.5rem; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--border); color: var(--text);">
+                        🔥 Extreme Heat
+                    </button>
+                    <button type="button"
+                        onclick="setPrompt('How do I reduce curtailment today for a 60 MW solar plant with BESS at 50% SoC?', {soc: 50})"
+                        style="padding: 0.5rem; font-size: 0.8rem; background: var(--surface); border: 1px solid var(--border); color: var(--text);">
+                        🔋 60MW / 50% SoC
+                    </button>
+                </div>
                 <textarea id="query" rows="4"
                     placeholder="e.g., We expect high solar clipping at noon. How should we dispatch?"></textarea>
             </div>
@@ -255,6 +278,28 @@
 
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script>
+        async function runDispatch() {
+            const btn = document.getElementById('run-btn');
+            const loading = document.getElementById('loading');
+            const resultDiv = document.getElementById('result');
+
+            const query = document.getElementById('query').value;
+            if (!query) return alert("Please enter a query");
+
+            // ... rest of logic
+            // (Note: I am not changing the existing function, just finding where to insert setPrompt before it, 
+            // but the tool requires me to replace a block. I will insert setPrompt BEFORE runDispatch)
+
+        }
+
+        function setPrompt(text, config) {
+            document.getElementById('query').value = text;
+            if (config && config.soc !== undefined) {
+                document.getElementById('soc').value = config.soc;
+                document.getElementById('soc-val').textContent = config.soc + '%';
+            }
+        }
+
         async function runDispatch() {
             const btn = document.getElementById('run-btn');
             const loading = document.getElementById('loading');

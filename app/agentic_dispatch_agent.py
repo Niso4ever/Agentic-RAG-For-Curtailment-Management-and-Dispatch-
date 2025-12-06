@@ -514,7 +514,19 @@ def run_agentic_dispatch(user_query: str, plant_meta: Dict[str, Any] = None) -> 
                 if not last_rag:
                     last_rag = {}
                 # Always refresh weather immediately before optimization to capture live changes.
-                last_weather = agent_tools.get_live_weather_features()
+                last_weather = agent_tools.get_live_weather_features() or {}
+
+                # ALLOW MANUAL OVERRIDE: Check if 'temperature' is in plant_meta and overwrite
+                if plant_meta.get("temperature") is not None:
+                    override_temp = float(plant_meta["temperature"])
+                    last_weather["mean_temperature"] = override_temp
+                    last_weather["temperature"] = override_temp
+                    # Ensure debug sources don't conflict
+                    if "debug_weather_source" not in last_weather:
+                        last_weather["debug_weather_source"] = {}
+                    if isinstance(last_weather["debug_weather_source"], dict):
+                        last_weather["debug_weather_source"]["temp"] = override_temp
+
 
                 # Build a MILP payload from forecast + rag + plant meta
                 milp_payload = agent_tools.prepare_milp_payload(
