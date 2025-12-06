@@ -1,9 +1,5 @@
 # Agentic RAG for Curtailment Management and Dispatch
-<p align="center">
-  <img src="assets/Logo2.jpg" alt="Project Logo" width="200">
-</p>
 
-![Project Logo](logo2.jpg)
 
 An end-to-end **Agentic AI Application** that optimizes renewable energy dispatch by combining three advanced disciplines:
 
@@ -29,7 +25,7 @@ graph LR
     subgraph "Google Cloud Platform"
         Agent --> Forecast[Vertex AI Forecast]
         Agent --> RAG[Vertex Vector Search]
-        Agent --> Solver[MILP Solver (Cloud Run)]
+        Agent --> Solver["MILP Solver (Cloud Run)"]
     end
     
     Forecast --> Optimizer[Optimization Logic]
