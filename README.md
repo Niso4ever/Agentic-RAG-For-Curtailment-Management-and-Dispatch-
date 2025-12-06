@@ -1,4 +1,5 @@
-# Agentic RAG for Curtailment Management and Dispatch
+# Renewable Energy 
+Agentic RAG for Curtailment Management and Dispatch
 
 ![Project Logo](logo2.jpg)
 
