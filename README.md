@@ -1,4 +1,7 @@
 # Agentic RAG for Curtailment Management and Dispatch
+<p align="center">
+  <img src="assets/Logo2.jpg" alt="Project Logo" width="200">
+</p>
 
 An end-to-end **Agentic AI Application** that optimizes renewable energy dispatch by combining three advanced disciplines:
 
