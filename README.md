@@ -3,6 +3,8 @@
   <img src="assets/Logo2.jpg" alt="Project Logo" width="200">
 </p>
 
+![Project Logo](logo2.jpg)
+
 An end-to-end **Agentic AI Application** that optimizes renewable energy dispatch by combining three advanced disciplines:
 
 1.  **Live Solar Forecasting**: Integrates with Google Cloud Vertex AI to fetch real-time solar generation predictions.
