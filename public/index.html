@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentic AI for Curtailment Management and Dispatch Optimization</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #00E676;
+            --primary-dark: #00C853;
+            --bg: #0F172A;
+            --surface: #1E293B;
+            --text: #F8FAFC;
+            --text-secondary: #94A3B8;
+            --border: #334155;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background-color: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 2rem;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo {
+            font-weight: 700;
+            font-size: 1.2rem;
+            /* Slightly smaller to fit long text */
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        main {
+            flex: 1;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            width: 100%;
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 2rem;
+        }
+
+        @media (max-width: 768px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .panel {
+            background-color: var(--surface);
+            border-radius: 1rem;
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+            height: fit-content;
+        }
+
+        h2 {
+            font-size: 1.25rem;
+            margin-bottom: 1.5rem;
+            color: var(--text);
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 0.5rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        input[type="number"],
+        input[type="range"],
+        textarea {
+            width: 100%;
+            background-color: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            font-family: inherit;
+            transition: border-color 0.2s;
+        }
+
+        input:focus,
+        textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        button {
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            color: #000;
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            font-size: 1rem;
+            transition: transform 0.1s, opacity 0.2s;
+        }
+
+        button:hover {
+            opacity: 0.9;
+        }
+
+        button:active {
+            transform: scale(0.98);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .result-area {
+            min-height: 400px;
+            white-space: pre-wrap;
+            font-family: 'Outfit', sans-serif;
+            /* Keep consistent font */
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid var(--border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1rem;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* Markdown-like styling for results */
+        .markdown h1,
+        .markdown h2,
+        .markdown h3 {
+            margin-top: 1.5rem;
+            margin-bottom: 0.5rem;
+            color: var(--text);
+        }
+
+        .markdown p {
+            margin-bottom: 1rem;
+            color: var(--text-secondary);
+        }
+
+        .markdown ul,
+        .markdown ol {
+            margin-bottom: 1rem;
+            padding-left: 1.5rem;
+            color: var(--text-secondary);
+        }
+
+        .markdown strong {
+            color: var(--primary);
+        }
+
+        .markdown code {
+            background: #000;
+            padding: 0.2rem 0.4rem;
+            border-radius: 0.3rem;
+            font-family: monospace;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div class="logo">⚡ Agentic AI for Curtailment Management and Dispatch Optimization</div>
+    </header>
+
+    <main>
+        <aside class="panel">
+            <h2>Plant Configuration</h2>
+            <div class="form-group">
+                <label>BESS Capacity (MWh)</label>
+                <input type="number" id="capacity" value="50" min="1">
+            </div>
+            <div class="form-group">
+                <label>Current SoC (%)</label>
+                <input type="range" id="soc" value="35" min="0" max="100"
+                    oninput="document.getElementById('soc-val').textContent = this.value + '%'">
+                <div style="text-align: right; font-size: 0.8rem; color: var(--primary);" id="soc-val">35%</div>
+            </div>
+            <div class="form-group">
+                <label>Charge Limit (MW)</label>
+                <input type="number" id="max_charge" value="50" min="1">
+            </div>
+            <div class="form-group">
+                <label>Discharge Limit (MW)</label>
+                <input type="number" id="max_discharge" value="50" min="1">
+            </div>
+        </aside>
+
+        <section class="panel">
+            <h2>Operator Query</h2>
+            <div class="form-group">
+                <textarea id="query" rows="4"
+                    placeholder="e.g., We expect high solar clipping at noon. How should we dispatch?"></textarea>
+            </div>
+            <button id="run-btn" onclick="runDispatch()">Run Analysis</button>
+
+            <div id="loading" class="loading">
+                <div class="spinner"></div>
+                <p>Running Forecast → RAG → MILP...</p>
+            </div>
+
+            <div id="result" class="result-area markdown" style="margin-top: 2rem;"></div>
+        </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        async function runDispatch() {
+            const btn = document.getElementById('run-btn');
+            const loading = document.getElementById('loading');
+            const resultDiv = document.getElementById('result');
+
+            const query = document.getElementById('query').value;
+            if (!query) return alert("Please enter a query");
+
+            const plantMeta = {
+                capacity_mwh: parseFloat(document.getElementById('capacity').value),
+                soc: parseFloat(document.getElementById('soc').value) / 100,
+                max_charge_mw: parseFloat(document.getElementById('max_charge').value),
+                max_discharge_mw: parseFloat(document.getElementById('max_discharge').value)
+            };
+
+            btn.disabled = true;
+            loading.style.display = 'block';
+            resultDiv.innerHTML = '';
+
+            try {
+                const response = await fetch('/dispatch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, plant_meta: plantMeta })
+                });
+
+                if (!response.ok) throw new Error(await response.text());
+
+                const data = await response.json();
+                resultDiv.innerHTML = marked.parse(data.result);
+            } catch (err) {
+                resultDiv.innerHTML = `<p style="color: #ff5252">Error: ${err.message}</p>`;
+            } finally {
+                btn.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+
+</html>

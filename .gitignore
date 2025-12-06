@@ -1,0 +1,36 @@
+# Secrets
+.env
+env.yaml
+secrets.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Logs and Temporary files
+*.log
+*.json
+curl_output.txt
+response.json
+verify_response.json
+milp_test.json
+tunnel.log
+tunnel_api.log
+uvicorn.log
+streamlit.log
+firebase-debug.log
+
+# Google Cloud SDK and Archives
+google-cloud-sdk/
+*.tar.gz
+Agentic-RAG-For-Curtailment-Management-and-Dispatch-/
+
+# Mac
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
